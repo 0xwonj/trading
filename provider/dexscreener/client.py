@@ -30,6 +30,8 @@ class DexScreenerClient:
         self,
         timeout: float = DEFAULT_TIMEOUT,
         polling_interval: float = DEFAULT_POLLING_INTERVAL,
+        use_zyte: bool = False,
+        zyte_api_key: Optional[str] = None
     ):
         """
         Initialize the DexScreener API client.
@@ -51,6 +53,9 @@ class DexScreenerClient:
             tuple[str, str], bool
         ] = {}  # (address, network) -> is_tracking
         self._event_bus = EventBus()
+        self._subscriptions: Dict[str, asyncio.Task] = {}
+        self.use_zyte = use_zyte
+        self.zyte_api_key = zyte_api_key
 
     async def __aenter__(self) -> DexScreenerClient:
         """Enable async context manager support."""
@@ -63,6 +68,8 @@ class DexScreenerClient:
     async def close(self) -> None:
         """Close the underlying HTTP client and stop polling."""
         await self.stop_polling()
+        for sub_id in list(self._subscriptions.keys()):
+            self.unsubscribe(sub_id)
         await self._client.aclose()
 
     async def _make_request(self, endpoint: str, params: dict | None = None) -> dict:
@@ -80,7 +87,23 @@ class DexScreenerClient:
             DexScreenerAPIError: If the API request fails
         """
         try:
-            response = await self._client.get(endpoint, params=params)
+            if self.use_zyte:
+                zyte_url = "https://api.zyte.com/v1/extract"
+                payload = {
+                    "url": endpoint,
+                    "httpResponseBody": True,
+                }
+                if params:
+                    payload.update(params)
+                auth = (self.zyte_api_key, "") if self.zyte_api_key else None
+                headers = {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+                }
+                response = await self._client.post(zyte_url, json=payload, auth=auth, headers=headers)
+            else:
+                response = await self._client.get(endpoint, params=params)
             response.raise_for_status()
             return response.json()
         except httpx.HTTPError as e:
@@ -311,7 +334,56 @@ class DexScreenerClient:
 
         addresses = ",".join(token_addresses)
         return self._make_request(f"{self.BASE_URL}/tokens/v1/{chain_id}/{addresses}")
+    
 
+    def subscribe(self, chain_id: str, token_addresses: List[str]) -> str:
+        """
+        Subscribe to token pair updates by automatically calling get_pairs_by_token_async
+        with the provided chain_id and token_addresses list.
+
+        Args:
+            chain_id: Chain ID (e.g., "solana")
+            token_addresses: List of token addresses
+
+        Returns:
+            A subscription ID that can be used to unsubscribe later.
+        """
+        subscription_id = f"{chain_id}:" + ":".join(token_addresses)
+        if subscription_id in self._subscriptions:
+            print(f"Subscription {subscription_id} already exists.")
+            return subscription_id
+
+        task = asyncio.create_task(self._poll_subscription(subscription_id, chain_id, token_addresses))
+        self._subscriptions[subscription_id] = task
+        print(f"Subscribed: {subscription_id}")
+        return subscription_id
+
+    async def _poll_subscription(self, subscription_id: str, chain_id: str, token_addresses: List[str]) -> None:
+        """
+        Continuously poll get_pairs_by_token_async for a specific subscription.
+        """
+        try:
+            while True:
+                pairs = await self.get_pairs_by_token_async(chain_id, token_addresses)
+                print(f"Subscription {subscription_id} pairs: {pairs}")
+                await asyncio.sleep(self.polling_interval)
+        except asyncio.CancelledError:
+            print(f"Polling cancelled for subscription {subscription_id}")
+
+    def unsubscribe(self, subscription_id: str) -> None:
+        """
+        Unsubscribe from a token pair update by cancelling the polling task associated with the subscription ID.
+
+        Args:
+            subscription_id: The subscription ID returned by subscribe.
+        """
+        task = self._subscriptions.get(subscription_id)
+        if task:
+            task.cancel()
+            del self._subscriptions[subscription_id]
+            print(f"Unsubscribed: {subscription_id}")
+        else:
+            print(f"No subscription found with id: {subscription_id}")
 
 if __name__ == "__main__":
     client = DexScreenerClient()
