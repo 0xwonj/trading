@@ -1,11 +1,11 @@
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, auto
 
 
 class EventType(Enum):
-    PRICE_UPDATE = "PRICE_UPDATE"
-    ORDER_FILLED = "ORDER_FILLED"
-    RAY_BOT = "RAY_BOT"
+    RAY_BOT = auto()
+    PRICE_UPDATE = auto()
+    POSITION_SIZING = auto()
 
 
 @dataclass

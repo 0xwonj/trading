@@ -1,76 +1,142 @@
+import asyncio
+import itertools
 import os
+from typing import Dict, List
 
 from dotenv import load_dotenv
 from telethon import events
 
-from telegram.client import Telegram
-from telegram.handlers import print_handler, create_raybot_handler
-from telegram.model.models import Channel
-from trading.bot.core import Bot
+from provider.telegram.client import Telegram
+from provider.telegram.handlers import raybot_handler
+from trading.bot.bot import Bot
+from trading.bot.builder import CopyTradingBotBuilder
 from trading.bot.manager import BotManager
-from trading.model.token import Token, TokenRegistry
-from trading.strategy.copy import CopyStrategy
-from trading.action.buy import Buy
-from trading.action.sell import Sell
-from trading.model.event import EventType
+
+
+def generate_bot_configs() -> List[Dict]:
+    """
+    Generate different bot configurations for backtesting.
+
+    :return: List of configuration dictionaries
+    """
+    # Define parameter ranges for testing
+    initial_balances = [1000.0]
+    trader_weights = [{"NORMAL11": 0.5, "NORMAL12": 1.0}]
+    buy_thresholds = [3.0, 5.0, 10.0, 15.0, 20.0]
+    sell_thresholds = [3.0, 5.0, 10.0, 15.0, 20.0]
+    max_position_sizes = [100_000, 500_000, 1_000_000, 5_000_000, 10_000_000]
+    max_risk_per_trades = [5.0, 10.0]
+
+    configs = []
+    # Generate all combinations of parameters
+    combinations = itertools.product(
+        initial_balances,
+        trader_weights,
+        buy_thresholds,
+        sell_thresholds,
+        max_position_sizes,
+        max_risk_per_trades,
+    )
+
+    for combo in combinations:
+        (
+            initial_balance,
+            weights,
+            buy_threshold,
+            sell_threshold,
+            max_position_size,
+            max_risk_per_trade,
+        ) = combo
+
+        config = {
+            "initial_balance": initial_balance,
+            "trader_weights": weights,
+            "buy_threshold": buy_threshold,
+            "sell_threshold": sell_threshold,
+            "max_position_size": max_position_size,
+            "max_risk_per_trade": max_risk_per_trade,
+        }
+        configs.append(config)
+
+    return configs
+
+
+async def setup_bot(name: str, config: Dict) -> Bot:
+    """
+    Set up a trading bot with the given configuration.
+
+    :param name: Name of the bot
+    :param config: Configuration dictionary containing all parameters
+    :return: Configured Bot instance
+    """
+    builder = (
+        CopyTradingBotBuilder(name)
+        .with_initial_balance(config["initial_balance"])
+        .with_trader_weights(config["trader_weights"])
+        .with_thresholds(config["buy_threshold"], config["sell_threshold"])
+        .with_sizing_strategy(config["max_position_size"], config["max_risk_per_trade"])
+    )
+
+    return await builder.build()
+
+
+async def setup_telegram_client() -> Telegram:
+    """
+    Set up and configure the Telegram client.
+
+    :return: Configured Telegram client instance
+    """
+    client = Telegram(
+        "meme-bot", os.getenv("TELEGRAM_API_ID"), os.getenv("TELEGRAM_API_HASH")
+    )
+    await client.start()
+    client.add_event_handler(
+        raybot_handler, events.NewMessage(chats=os.getenv("RAY_BOT_CHANNEL"))
+    )
+    return client
 
 
 async def main():
+    # Load environment variables
     load_dotenv()
 
-    # Initialize the bot
-    bot = Bot("CopyTradingBot")
+    print(os.getenv("TELEGRAM_API_ID"))
+    print(os.getenv("TELEGRAM_API_HASH"))
+    import time
 
-    # Initialize the Token Registry with the SOL token.
-    sol_token = ("0x0", "solana")
-    TokenRegistry.set_token(
-        Token(sol_token[0], sol_token[1], "Sol", "SOL", 1.0, 1_000_000)
-    )
-    # Initialize the Portfolio with some initial holdings.
-    bot.portfolio = {
-        sol_token: 1000,  # 1000 SOL
-    }
+    time.sleep(3)
 
-    # Hard-coded trader weights: mapping trader wallet addresses to weight multipliers.
-    trader_weights = {
-        "trader1_wallet": 0.5,  # Copy 50% of trader1's trades.
-        "trader2_wallet": 1.0,  # Copy 100% of trader2's trades.
-    }
+    try:
+        # Generate bot configurations
+        configs = generate_bot_configs()
 
-    # Register the Copy strategy for the RAY_BOT event type.
-    copy_strategy = CopyStrategy(trader_weights)
-    bot.set_strategy(EventType.RAY_BOT, copy_strategy)
+        # Create bot manager
+        bot_manager = BotManager()
 
-    # Register the Buy and Sell actions.
-    bot.set_action("buy", Buy(sol_token))
-    bot.set_action("sell", Sell(sol_token))
+        # Set up all bots with different configurations
+        bots = []
+        for i, config in enumerate(configs):
+            bot_name = f"CopyTradingBot_{i + 1}"
+            bot = await setup_bot(bot_name, config)
+            bot_manager.register_bot(bot)
+            bots.append((bot_name, config))
+            bot.logger.info(f"Created and registered {bot_name} with config: {config}")
 
-    # Initialize the bot manager
-    manager = BotManager()
+        # Set up and run telegram client
+        client = await setup_telegram_client()
 
-    # Add the bot to the manager
-    manager.add_bot(bot)
+        print(f"Running {len(bots)} bots for backtesting. Press Ctrl+C to stop.")
+        await client.run_until_disconnected()
 
-    # Initialize the Telegram Client
-    client = Telegram(
-        "test", os.getenv("TELEGRAM_API_ID"), os.getenv("TELEGRAM_API_HASH")
-    )
-
-    # Start the client session
-    await client.start()
-
-    # Create the RayBot handler
-    raybot_handler = create_raybot_handler(manager)
-
-    # Add event handlers to the telegram client
-    client.add_handler(print_handler, events.NewMessage(chats=Channel.TEST.value))
-    client.add_handler(raybot_handler, events.NewMessage(chats=Channel.TEST.value))
-
-    # Run the client until it's disconnected
-    await client.run_until_disconnected()
+    except Exception as e:
+        print(f"Error in main: {str(e)}")
+        raise
+    finally:
+        # Cleanup all bots
+        if "bots" in locals():
+            for bot_name, _ in bots:
+                bot_manager.remove_bot(bot_name)
 
 
 if __name__ == "__main__":
-    import asyncio
-
     asyncio.run(main())

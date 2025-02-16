@@ -1,5 +1,6 @@
 from telethon import TelegramClient
-from telegram.model.protocols import TelegramEvent, Dialog
+
+from provider.telegram.model.protocols import Dialog, TelegramEvent
 
 
 class Telegram:
@@ -12,7 +13,7 @@ class Telegram:
     async def run_until_disconnected(self) -> None:
         await self.client.run_until_disconnected()
 
-    def add_handler(self, callback: callable, event: TelegramEvent) -> None:
+    def add_event_handler(self, callback: callable, event: TelegramEvent) -> None:
         self.client.add_event_handler(callback, event)
 
     async def get_chat_id(self, chat_name: str) -> int:
