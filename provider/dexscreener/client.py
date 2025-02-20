@@ -1,18 +1,37 @@
 from __future__ import annotations
 
-import asyncio
-from typing import Dict, List, Optional
+from typing import Optional, Protocol
 
 import httpx
-
-from trading.bot.event_bus import EventBus
-from trading.model.event import Event, EventType
-from trading.strategy.sell.stop_loss import TokenMarketCapData
 
 from .errors import DexScreenerAPIError
 
 
-class DexScreenerClient:
+class DexScreenerClient(Protocol):
+    async def get_pairs_by_token(
+        self, chain_id: str, token_addresses: list[str]
+    ) -> list[dict]: ...
+
+    async def get_latest_token_profiles(self) -> list[dict]: ...
+
+    async def get_latest_boosted_tokens(self) -> list[dict]: ...
+
+    async def get_top_boosted_tokens(self) -> list[dict]: ...
+
+    async def check_token_orders(
+        self, chain_id: str, token_address: str
+    ) -> list[dict]: ...
+
+    async def get_pair_by_chain(self, chain_id: str, pair_id: str) -> list[dict]: ...
+
+    async def search_pairs(self, query: str) -> list[dict]: ...
+
+    async def get_token_pools(
+        self, chain_id: str, token_address: str
+    ) -> list[dict]: ...
+
+
+class DexScreenerZyteClient(DexScreenerClient):
     """
     A client for interacting with the DexScreener API.
     Rate limits:
@@ -24,19 +43,18 @@ class DexScreenerClient:
 
     BASE_URL = "https://api.dexscreener.com"
     DEFAULT_TIMEOUT = 10.0  # seconds
-    DEFAULT_POLLING_INTERVAL = 60.0  # seconds
 
     def __init__(
         self,
         timeout: float = DEFAULT_TIMEOUT,
-        polling_interval: float = DEFAULT_POLLING_INTERVAL,
+        zyte_api_key: Optional[str] = None,
     ):
         """
         Initialize the DexScreener API client.
 
         Args:
             timeout: Request timeout in seconds
-            polling_interval: Interval between market cap updates in seconds
+            zyte_api_key: Optional Zyte API key for proxy service
         """
         self._client = httpx.AsyncClient(
             timeout=timeout,
@@ -45,14 +63,9 @@ class DexScreenerClient:
                 "User-Agent": "DexScreenerPythonClient/1.0",
             },
         )
-        self.polling_interval = polling_interval
-        self._polling_task: Optional[asyncio.Task] = None
-        self._tracked_tokens: Dict[
-            tuple[str, str], bool
-        ] = {}  # (address, network) -> is_tracking
-        self._event_bus = EventBus()
+        self.zyte_api_key = zyte_api_key
 
-    async def __aenter__(self) -> DexScreenerClient:
+    async def __aenter__(self) -> DexScreenerZyteClient:
         """Enable async context manager support."""
         return self
 
@@ -61,8 +74,7 @@ class DexScreenerClient:
         await self.close()
 
     async def close(self) -> None:
-        """Close the underlying HTTP client and stop polling."""
-        await self.stop_polling()
+        """Close the underlying HTTP client."""
         await self._client.aclose()
 
     async def _make_request(self, endpoint: str, params: dict | None = None) -> dict:
@@ -80,113 +92,40 @@ class DexScreenerClient:
             DexScreenerAPIError: If the API request fails
         """
         try:
-            response = await self._client.get(endpoint, params=params)
+            zyte_url = "https://api.zyte.com/v1/extract"
+            payload = {
+                "url": endpoint,
+                "httpResponseBody": True,
+            }
+            if params:
+                payload.update(params)
+            auth = (self.zyte_api_key, "") if self.zyte_api_key else None
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+            }
+            response = await self._client.post(
+                zyte_url, json=payload, auth=auth, headers=headers
+            )
             response.raise_for_status()
             return response.json()
         except httpx.HTTPError as e:
             raise DexScreenerAPIError(f"API request failed: {str(e)}") from e
 
-    def track_token(self, address: str, network: str) -> None:
+    async def get_pairs_by_token(
+        self, chain_id: str, token_addresses: list[str]
+    ) -> list[dict]:
         """
-        Start tracking a token for market cap updates.
+        Get pairs for multiple token addresses.
+        Maximum 30 token addresses allowed.
 
         Args:
-            address: Token address
-            network: Network name (e.g., "solana")
-        """
-        self._tracked_tokens[(address, network)] = True
-        print(f"[DexScreener] Started tracking token ({address}) on {network}")
+            chain_id: Chain ID (e.g., "solana")
+            token_addresses: List of token addresses
 
-    def untrack_token(self, address: str, network: str) -> None:
-        """
-        Stop tracking a token.
-
-        Args:
-            address: Token address
-            network: Network name (e.g., "solana")
-        """
-        self._tracked_tokens.pop((address, network), None)
-        print(f"[DexScreener] Stopped tracking token ({address}) on {network}")
-
-    async def start_polling(self) -> None:
-        """Start the market cap polling task."""
-        if self._polling_task is None:
-            self._polling_task = asyncio.create_task(self._poll_market_caps())
-            print("[DexScreener] Started market cap polling")
-
-    async def stop_polling(self) -> None:
-        """Stop the market cap polling task."""
-        if self._polling_task is not None:
-            self._polling_task.cancel()
-            try:
-                await self._polling_task
-            except asyncio.CancelledError:
-                pass
-            self._polling_task = None
-            print("[DexScreener] Stopped market cap polling")
-
-    async def _poll_market_caps(self) -> None:
-        """
-        Continuously poll market caps for tracked tokens and publish updates.
-        """
-        while True:
-            try:
-                tracked_tokens = list(self._tracked_tokens.keys())
-                if not tracked_tokens:
-                    await asyncio.sleep(self.polling_interval)
-                    continue
-
-                # Process tokens in batches of 30 (API limit)
-                for i in range(0, len(tracked_tokens), 30):
-                    batch = tracked_tokens[i : i + 30]
-                    for address, network in batch:
-                        # Get token data
-                        pairs = await self.get_pairs_by_token_async(network, [address])
-                        if not pairs:
-                            continue
-
-                        # Find the pair with highest liquidity
-                        pair = max(
-                            pairs,
-                            key=lambda p: float(p.get("liquidity", {}).get("usd", 0)),
-                        )
-
-                        # Extract market cap
-                        market_cap = float(
-                            pair.get("fdv", 0)
-                        )  # Using FDV as market cap
-                        if market_cap <= 0:
-                            continue
-
-                        # Create and publish market cap update
-                        market_cap_data = TokenMarketCapData(
-                            address=address,
-                            network=network,
-                            market_cap=market_cap,
-                        )
-
-                        event = Event(EventType.MARKET_CAP_UPDATE, market_cap_data)
-                        await self._event_bus.publish(event)
-                        print(
-                            f"[DexScreener] Published market cap update for {address}: "
-                            f"{market_cap:,.2f}"
-                        )
-
-                    # Small delay between batches to respect rate limits
-                    await asyncio.sleep(1)
-
-                # Wait for next polling interval
-                await asyncio.sleep(self.polling_interval)
-
-            except Exception as e:
-                print(f"[DexScreener] Error polling market caps: {str(e)}")
-                await asyncio.sleep(self.polling_interval)
-
-    async def get_pairs_by_token_async(
-        self, chain_id: str, token_addresses: List[str]
-    ) -> List[Dict]:
-        """
-        Async version of get_pairs_by_token.
+        Returns:
+            List of pair dictionaries
         """
         if len(token_addresses) > 30:
             raise ValueError("Maximum 30 token addresses allowed")
@@ -196,7 +135,7 @@ class DexScreenerClient:
             f"{self.BASE_URL}/tokens/v1/{chain_id}/{addresses}"
         )
 
-    def get_latest_token_profiles(self) -> list[dict]:
+    async def get_latest_token_profiles(self) -> list[dict]:
         """
         Get the latest token profiles.
         Rate limit: 60 requests per minute.
@@ -204,9 +143,9 @@ class DexScreenerClient:
         Returns:
             List of token profile dictionaries
         """
-        return self._make_request(f"{self.BASE_URL}/token-profiles/latest/v1")
+        return await self._make_request(f"{self.BASE_URL}/token-profiles/latest/v1")
 
-    def get_latest_boosted_tokens(self) -> list[dict]:
+    async def get_latest_boosted_tokens(self) -> list[dict]:
         """
         Get the latest boosted tokens.
         Rate limit: 60 requests per minute.
@@ -214,9 +153,9 @@ class DexScreenerClient:
         Returns:
             List of token boost dictionaries
         """
-        return self._make_request(f"{self.BASE_URL}/token-boosts/latest/v1")
+        return await self._make_request(f"{self.BASE_URL}/token-boosts/latest/v1")
 
-    def get_top_boosted_tokens(self) -> list[dict]:
+    async def get_top_boosted_tokens(self) -> list[dict]:
         """
         Get the tokens with most active boosts.
         Rate limit: 60 requests per minute.
@@ -224,9 +163,9 @@ class DexScreenerClient:
         Returns:
             List of token boost dictionaries
         """
-        return self._make_request(f"{self.BASE_URL}/token-boosts/top/v1")
+        return await self._make_request(f"{self.BASE_URL}/token-boosts/top/v1")
 
-    def check_token_orders(self, chain_id: str, token_address: str) -> list[dict]:
+    async def check_token_orders(self, chain_id: str, token_address: str) -> list[dict]:
         """
         Check orders paid for a token.
         Rate limit: 60 requests per minute.
@@ -238,11 +177,11 @@ class DexScreenerClient:
         Returns:
             List of order dictionaries
         """
-        return self._make_request(
+        return await self._make_request(
             f"{self.BASE_URL}/orders/v1/{chain_id}/{token_address}"
         )
 
-    def get_pair_by_chain(self, chain_id: str, pair_id: str) -> list[dict]:
+    async def get_pair_by_chain(self, chain_id: str, pair_id: str) -> list[dict]:
         """
         Get one or multiple pairs by chain and pair address.
         Rate limit: 300 requests per minute.
@@ -254,12 +193,12 @@ class DexScreenerClient:
         Returns:
             List of pair dictionaries
         """
-        response = self._make_request(
+        response = await self._make_request(
             f"{self.BASE_URL}/latest/dex/pairs/{chain_id}/{pair_id}"
         )
         return response.get("pairs", [])
 
-    def search_pairs(self, query: str) -> list[dict]:
+    async def search_pairs(self, query: str) -> list[dict]:
         """
         Search for pairs by token address, name, or symbol.
         Rate limit: 300 requests per minute.
@@ -270,12 +209,12 @@ class DexScreenerClient:
         Returns:
             List of pair dictionaries matching the search criteria
         """
-        response = self._make_request(
+        response = await self._make_request(
             f"{self.BASE_URL}/latest/dex/search", params={"q": query}
         )
         return response.get("pairs", [])
 
-    def get_token_pools(self, chain_id: str, token_address: str) -> list[dict]:
+    async def get_token_pools(self, chain_id: str, token_address: str) -> list[dict]:
         """
         Get the pools of a given token address.
         Rate limit: 300 requests per minute.
@@ -287,32 +226,6 @@ class DexScreenerClient:
         Returns:
             List of pair dictionaries
         """
-        return self._make_request(
+        return await self._make_request(
             f"{self.BASE_URL}/token-pairs/v1/{chain_id}/{token_address}"
         )
-
-    def get_pairs_by_token(
-        self, chain_id: str, token_addresses: list[str]
-    ) -> list[dict]:
-        """
-        Get one or multiple pairs by token address.
-        Rate limit: 300 requests per minute.
-        Maximum 30 addresses allowed.
-
-        Args:
-            chain_id: Chain ID (e.g., "solana")
-            token_addresses: List of token addresses (max 30)
-
-        Returns:
-            List of pair dictionaries
-        """
-        if len(token_addresses) > 30:
-            raise ValueError("Maximum 30 token addresses allowed")
-
-        addresses = ",".join(token_addresses)
-        return self._make_request(f"{self.BASE_URL}/tokens/v1/{chain_id}/{addresses}")
-
-
-if __name__ == "__main__":
-    client = DexScreenerClient()
-    print(client.get_latest_token_profiles())

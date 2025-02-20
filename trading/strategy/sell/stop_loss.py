@@ -11,8 +11,8 @@ class TokenMarketCapData:
     Token market cap data for stop loss tracking.
     """
 
-    address: str
     network: str
+    address: str
     market_cap: float
 
 
@@ -45,14 +45,14 @@ class StopLossStrategy:
         :param stop_loss_percentage: Percentage drop from high that triggers stop loss (e.g., 50.0 for 50%)
         """
         self.stop_loss_percentage = stop_loss_percentage
-        # Track tokens: (address, network) -> TokenTracker
+        # Track tokens: (network, address) -> TokenTracker
         self.token_trackers: dict[tuple[str, str], TokenTracker] = {}
 
     def _should_track_token(self, token_key: tuple[str, str], bot: "Bot") -> bool:
         """
         Determine if we should track this token (only if we have a position).
 
-        :param token_key: Tuple of (token_address, network)
+        :param token_key: Tuple of (network, address)
         :param bot: Bot instance to check portfolio
         :return: True if we should track this token
         """
@@ -86,7 +86,7 @@ class StopLossStrategy:
         """
         try:
             market_cap = token_meta.market_cap
-            token_key = (token_meta.address, token_meta.network)
+            token_key = (token_meta.network, token_meta.address)
 
             # Check if we should track this token
             if not self._should_track_token(token_key, bot):
@@ -103,14 +103,14 @@ class StopLossStrategy:
                     last_market_cap=market_cap,
                 )
                 bot.logger.info(
-                    f"Started tracking token ({token_meta.address}) "
+                    f"Started tracking token ({token_meta.network}, {token_meta.address}) "
                     f"at market cap {market_cap:,.2f}"
                 )
             else:
                 tracker = self.token_trackers[token_key]
                 tracker.update_market_cap(market_cap)
                 bot.logger.debug(
-                    f"Token ({token_meta.address}) - "
+                    f"Token ({token_meta.network}, {token_meta.address}) - "
                     f"Current: {market_cap:,.2f}, "
                     f"High: {tracker.market_cap_high:,.2f}"
                 )
@@ -124,7 +124,7 @@ class StopLossStrategy:
                     * 100
                 )
                 bot.logger.warning(
-                    f"Triggering stop loss for token ({token_meta.address}) - "
+                    f"Triggering stop loss for token ({token_meta.network}, {token_meta.address}) - "
                     f"Drop: {drop_percentage:.2f}%"
                 )
                 await self._execute_sell(token_meta, bot)
@@ -139,19 +139,21 @@ class StopLossStrategy:
         :param token_meta: Token market cap data
         :param bot: Bot instance
         """
-        token_key = (token_meta.address, token_meta.network)
+        token_key = (token_meta.network, token_meta.address)
         token_quantity = bot.get_position(token_key)
 
         if token_quantity <= 0:
-            bot.logger.warning(f"No position to sell for token ({token_meta.address})")
+            bot.logger.warning(
+                f"No position to sell for token ({token_meta.network}, {token_meta.address})"
+            )
             return
 
         # Get current price from bot or market data service
         if sell_action := bot.get_action("SELL"):
             trade_data = {
                 "token": {
-                    "address": token_meta.address,
                     "network": token_meta.network,
+                    "address": token_meta.address,
                     "market_cap": token_meta.market_cap,
                 },
                 "quantity": token_quantity,

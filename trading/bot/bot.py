@@ -3,6 +3,7 @@ from logging import Logger
 from trading.action.buy import Buy
 from trading.action.sell import Sell
 from trading.bot.event_bus import EventBus
+from trading.bot.manager import BotManager
 from trading.model.event import Event, EventType
 from trading.model.protocols import Action, Strategy
 from trading.model.token import Token, TokenMeta, TokenRegistry
@@ -11,14 +12,15 @@ from trading.utils.logger import create_bot_logger
 
 
 class Bot:
-    def __init__(self, name: str):
+    def __init__(self, name: str, manager: BotManager):
         self.name: str = name
         self.logger: Logger = create_bot_logger(name)
         self._strategies: dict[EventType, Strategy] = {}
         self._actions: dict[str, Action] = {}  # Maps action names to actions
-        # Portfolio keyed by (token.address, token.network)
+        # Portfolio keyed by (network, address)
         self._portfolio: dict[TokenMeta, float] = {}
         self._event_bus = EventBus()
+        self._manager = manager
         self.logger.info(f"Bot '{name}' initialized")
 
     @property
@@ -30,35 +32,49 @@ class Bot:
         """
         return self._portfolio.copy()
 
-    def update_portfolio(self, token_key: TokenMeta, new_quantity: float) -> None:
+    def _update_portfolio(self, token_key: TokenMeta, new_quantity: float) -> None:
         """
-        Update the quantity of a token in the portfolio.
+        Update the quantity of a token in the portfolio and manage token subscription.
 
-        :param token_key: Tuple of (token.address, token.network)
+        :param token_key: Tuple of (network, address)
         :param new_quantity: New quantity to set
         """
         if new_quantity < 0:
             raise ValueError("Portfolio quantity cannot be negative")
+
+        old_quantity = self._portfolio.get(token_key, 0)
         self._portfolio[token_key] = new_quantity
+
+        # Subscribe to token if we're adding a new position
+        if old_quantity == 0 and new_quantity > 0:
+            network, address = token_key
+            self._manager.subscribe_token(network, address)
+            self.logger.debug(f"Subscribed to token updates for {network}:{address}")
+
+        # Unsubscribe from token if we're closing the position
+        elif old_quantity > 0 and new_quantity == 0:
+            network, address = token_key
+            self._manager.unsubscribe_token(network, address)
+            self.logger.debug(
+                f"Unsubscribed from token updates for {network}:{address}"
+            )
 
     def add_to_portfolio(self, token_key: TokenMeta, quantity: float) -> None:
         """
         Add quantity to a token position in the portfolio.
 
-        :param token_key: Tuple of (token.address, token.network)
+        :param token_key: Tuple of (network, address)
         :param quantity: Quantity to add (can be negative for reduction)
         """
         current = self._portfolio.get(token_key, 0)
         new_quantity = current + quantity
-        if new_quantity < 0:
-            raise ValueError("Portfolio quantity cannot be negative")
-        self._portfolio[token_key] = new_quantity
+        self._update_portfolio(token_key, new_quantity)
 
     def get_position(self, token_key: TokenMeta) -> float:
         """
         Get the current position of a token.
 
-        :param token_key: Tuple of (token.address, token.network)
+        :param token_key: Tuple of (network, address)
         :return: Current quantity held
         """
         return self._portfolio.get(token_key, 0)
@@ -147,7 +163,7 @@ if __name__ == "__main__":
 
     async def main():
         # Create an instance of the bot
-        bot = Bot("CopyTradingBot")
+        bot = Bot("CopyTradingBot", None)
 
         # Set up token
         sol_token = ("0x0", "solana")
@@ -156,7 +172,7 @@ if __name__ == "__main__":
         )
 
         # Initialize the Portfolio with some initial holdings
-        bot.update_portfolio(sol_token, 1000)  # 1000 units of SOL
+        bot.add_to_portfolio(sol_token, 1000)  # 1000 units of SOL
 
         # Set up trader weights
         trader_weights = {

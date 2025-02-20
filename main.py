@@ -6,6 +6,8 @@ from typing import Dict, List
 from dotenv import load_dotenv
 from telethon import events
 
+from provider.dexscreener.client import DexScreenerZyteClient
+from provider.dexscreener.poller import DexScreenerPoller
 from provider.telegram.client import Telegram
 from provider.telegram.handlers import raybot_handler
 from trading.bot.bot import Bot
@@ -61,16 +63,17 @@ def generate_bot_configs() -> List[Dict]:
     return configs
 
 
-async def setup_bot(name: str, config: Dict) -> Bot:
+async def setup_bot(name: str, config: Dict, manager: BotManager) -> Bot:
     """
     Set up a trading bot with the given configuration.
 
     :param name: Name of the bot
     :param config: Configuration dictionary containing all parameters
+    :param manager: BotManager instance for the bot
     :return: Configured Bot instance
     """
     builder = (
-        CopyTradingBotBuilder(name)
+        CopyTradingBotBuilder(name, manager)
         .with_initial_balance(config["initial_balance"])
         .with_trader_weights(config["trader_weights"])
         .with_thresholds(config["buy_threshold"], config["sell_threshold"])
@@ -107,17 +110,24 @@ async def main():
     time.sleep(3)
 
     try:
+        # Initialize DexScreener client and poller
+        dexscreener_client = DexScreenerZyteClient(
+            zyte_api_key=os.getenv("ZYTE_API_KEY")
+        )
+        dexscreener_poller = DexScreenerPoller(dexscreener_client)
+        await dexscreener_poller.start_polling()  # Start the polling process
+
         # Generate bot configurations
         configs = generate_bot_configs()
 
-        # Create bot manager
-        bot_manager = BotManager()
+        # Create bot manager with the poller
+        bot_manager = BotManager(dexscreener_poller)
 
         # Set up all bots with different configurations
         bots = []
         for i, config in enumerate(configs):
             bot_name = f"CopyTradingBot_{i + 1}"
-            bot = await setup_bot(bot_name, config)
+            bot = await setup_bot(bot_name, config, bot_manager)
             bot_manager.register_bot(bot)
             bots.append((bot_name, config))
             bot.logger.info(f"Created and registered {bot_name} with config: {config}")
@@ -132,10 +142,18 @@ async def main():
         print(f"Error in main: {str(e)}")
         raise
     finally:
+        # Stop the poller and cleanup
+        if "dexscreener_poller" in locals():
+            await dexscreener_poller.stop_polling()
+
         # Cleanup all bots
         if "bots" in locals():
             for bot_name, _ in bots:
                 bot_manager.remove_bot(bot_name)
+
+        # Close the DexScreener client
+        if "dexscreener_client" in locals():
+            await dexscreener_client.close()
 
 
 if __name__ == "__main__":
