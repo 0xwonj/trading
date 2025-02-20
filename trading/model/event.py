@@ -4,8 +4,8 @@ from enum import Enum, auto
 
 class EventType(Enum):
     RAY_BOT = auto()
-    PRICE_UPDATE = auto()
     POSITION_SIZING = auto()
+    MARKET_CAP_UPDATE = auto()
 
 
 @dataclass

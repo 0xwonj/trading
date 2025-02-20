@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 from typing import Optional, Protocol
 
 import httpx
@@ -109,9 +111,18 @@ class DexScreenerZyteClient(DexScreenerClient):
                 zyte_url, json=payload, auth=auth, headers=headers
             )
             response.raise_for_status()
-            return response.json()
+            zyte_response = response.json()
+
+            # Decode base64 httpResponseBody and parse as JSON
+            if "httpResponseBody" in zyte_response:
+                decoded_body = base64.b64decode(zyte_response["httpResponseBody"])
+                return json.loads(decoded_body)
+            raise DexScreenerAPIError("No httpResponseBody in Zyte response")
+
         except httpx.HTTPError as e:
             raise DexScreenerAPIError(f"API request failed: {str(e)}") from e
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise DexScreenerAPIError(f"Failed to decode response: {str(e)}") from e
 
     async def get_pairs_by_token(
         self, chain_id: str, token_addresses: list[str]

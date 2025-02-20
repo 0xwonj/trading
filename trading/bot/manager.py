@@ -1,31 +1,34 @@
 from collections import defaultdict
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-from provider.dexscreener.poller import DexScreenerPoller
-from trading.bot.bot import Bot
+if TYPE_CHECKING:
+    from provider.dexscreener.poller import DexScreenerPoller
+    from trading.bot.bot import Bot
 
 
 class BotManager:
     _instance = None
 
-    def __new__(cls):
+    def __new__(cls, dexscreener_poller: "DexScreenerPoller"):
         if cls._instance is None:
             cls._instance = super(BotManager, cls).__new__(cls)
             cls._instance._bots = {}
             cls._instance._token_subscribers = defaultdict(
                 int
             )  # (network, address) -> count
+            cls._instance._dexscreener_poller = dexscreener_poller
         return cls._instance
 
-    def __init__(self, dexscreener_poller: DexScreenerPoller) -> None:
-        # A dictionary mapping bot names to Bot instances
-        self._bots: dict[str, Bot] = {}
-        self._token_subscribers: dict[tuple[str, str], int] = defaultdict(
-            int
-        )  # (network, address) -> count
-        self._dexscreener_poller = dexscreener_poller
+    def __init__(self, dexscreener_poller: "DexScreenerPoller") -> None:
+        # Initialize only if not already initialized
+        if not hasattr(self, "_bots"):
+            self._bots: dict[str, Bot] = {}
+            self._token_subscribers: dict[tuple[str, str], int] = defaultdict(
+                int
+            )  # (network, address) -> count
+            self._dexscreener_poller = dexscreener_poller
 
-    def register_bot(self, bot: Bot) -> None:
+    def register_bot(self, bot: "Bot") -> None:
         """
         Add a bot to the manager.
 
@@ -34,7 +37,7 @@ class BotManager:
         self._bots[bot.name] = bot
         bot.logger.info(f"Added bot: {bot.name}")
 
-    def get_bot(self, bot_name: str) -> Optional[Bot]:
+    def get_bot(self, bot_name: str) -> Optional["Bot"]:
         """
         Get a bot from the manager by its name.
 

@@ -89,7 +89,7 @@ class DexScreenerPoller:
                 market_cap_data = TokenMarketCapData(
                     network=network,
                     address=base_token["address"],
-                    market_cap=float(base_token.get("marketCap", 0)),
+                    market_cap=float(pair.get("marketCap", 0)),
                 )
 
                 # Create task for publishing market cap update event

@@ -1,7 +1,6 @@
 import asyncio
 import itertools
 import os
-from typing import Dict, List
 
 from dotenv import load_dotenv
 from telethon import events
@@ -15,7 +14,7 @@ from trading.bot.builder import CopyTradingBotBuilder
 from trading.bot.manager import BotManager
 
 
-def generate_bot_configs() -> List[Dict]:
+def generate_bot_configs() -> list[dict]:
     """
     Generate different bot configurations for backtesting.
 
@@ -28,6 +27,7 @@ def generate_bot_configs() -> List[Dict]:
     sell_thresholds = [3.0, 5.0, 10.0, 15.0, 20.0]
     max_position_sizes = [100_000, 500_000, 1_000_000, 5_000_000, 10_000_000]
     max_risk_per_trades = [5.0, 10.0]
+    stop_loss_thresholds = [20.0, 30.0, 50.0, 70.0, 100.0]
 
     configs = []
     # Generate all combinations of parameters
@@ -38,6 +38,7 @@ def generate_bot_configs() -> List[Dict]:
         sell_thresholds,
         max_position_sizes,
         max_risk_per_trades,
+        stop_loss_thresholds,
     )
 
     for combo in combinations:
@@ -48,6 +49,7 @@ def generate_bot_configs() -> List[Dict]:
             sell_threshold,
             max_position_size,
             max_risk_per_trade,
+            stop_loss_threshold,
         ) = combo
 
         config = {
@@ -57,13 +59,14 @@ def generate_bot_configs() -> List[Dict]:
             "sell_threshold": sell_threshold,
             "max_position_size": max_position_size,
             "max_risk_per_trade": max_risk_per_trade,
+            "stop_loss_threshold": stop_loss_threshold,
         }
         configs.append(config)
 
     return configs
 
 
-async def setup_bot(name: str, config: Dict, manager: BotManager) -> Bot:
+async def setup_bot(name: str, config: dict, manager: BotManager) -> Bot:
     """
     Set up a trading bot with the given configuration.
 
@@ -78,6 +81,7 @@ async def setup_bot(name: str, config: Dict, manager: BotManager) -> Bot:
         .with_trader_weights(config["trader_weights"])
         .with_thresholds(config["buy_threshold"], config["sell_threshold"])
         .with_sizing_strategy(config["max_position_size"], config["max_risk_per_trade"])
+        .with_stop_loss_threshold(config["stop_loss_threshold"])
     )
 
     return await builder.build()
